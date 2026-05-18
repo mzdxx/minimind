@@ -3,34 +3,34 @@ import argparse
 import random
 import warnings
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer          # 从transformer中模块中取出特定功能，这里是几个类
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from model.model_lora import *
 from trainer.trainer_utils import setup_seed, get_model_params
 warnings.filterwarnings('ignore')
 
 def init_model(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
+    tokenizer = AutoTokenizer.from_pretrained(args.load_from)       # 从args.load_from路径加载一个分词器，
+    if 'model' in args.load_from:       # 如果加载路径中包含字符串'model',就认为要加载我们自己的MiniMind模型权重
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
             use_moe=bool(args.use_moe),
             inference_rope_scaling=args.inference_rope_scaling
-        ))
+        ))          # 一个配置类，一个MiniMindForCausalLM类，MiniMindForCausalLM接收配置类的对象
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)       # torch.load加载.pth文件，返回一个状态字典-字典是存储模型参数的数据结构
         if args.lora_weight != 'None':
             apply_lora(model)
             load_lora(model, f'./{args.save_dir}/{args.lora_weight}_{args.hidden_size}.pth')
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
-    get_model_params(model, model.config)
-    return model.half().eval().to(args.device), tokenizer
+    get_model_params(model, model.config)               # 打印模型参数量
+    return model.half().eval().to(args.device), tokenizer       # model.half()将模型转换为半精度浮点数，减少显存占用。.eval()将模型设置为评估模式，to(args.device)将模型移动到指定设备
 
 def main():
-    parser = argparse.ArgumentParser(description="MiniMind模型推理与对话")
+    parser = argparse.ArgumentParser(description="MiniMind模型推理与对话")      # argparse是模块，ArgumentParser是类，这是实例化一个该类的对象，这里parser是一个变量(varibale),变量的类型是ArgumentParser类的实例
     parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")

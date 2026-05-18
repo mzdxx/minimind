@@ -37,17 +37,17 @@ def Logger(content):
         print(content)
 
 
-def get_lr(current_step, total_steps, lr):
+def get_lr(current_step, total_steps, lr):          # 带下限的余弦衰减
     return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
 
 
 def init_distributed_mode():
-    if int(os.environ.get("RANK", -1)) == -1:
+    if int(os.environ.get("RANK", -1)) == -1:       # os.environ是一个字典-like对象，存储系统的环境变量，.get(),字典的get方法，如果环境变量rank不存在，说明没有启动分布式训练
         return 0  # 非DDP模式
 
-    dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")     # 初始化进程组，nnccl是GPU通信后端
+    local_rank = int(os.environ["LOCAL_RANK"])  # 环境变量LOCAL_RANK本地序号
+    torch.cuda.set_device(local_rank)       # 指定当前进程使用那张GPU
     return local_rank
 
 

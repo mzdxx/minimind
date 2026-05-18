@@ -1,15 +1,22 @@
 import os
 import sys
 
-__package__ = "trainer"
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+__package__ = "trainer"         # 告诉Python当前文件属于哪个包，便于相对导入
+# __package__是一个内置变量，与__name__类似，Python天生就给每个文件准备的内置变量，系统自带
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))     # 总的功能就是把上级目录加入模块搜索路径
+# __file__内置变量，当前这个.py文件的完整路径
+# os.path.dirname(__file__)返回路径名的目录部分，也就是取当前文件所在文件夹路径
+# .join()拼接这两个路径,..表示返回上一级目录
+# abspath()把相对路径转换为绝对路径
+# sys.path.append() 把一个路径添加到Python的模块搜索路径列表里
 
 import argparse
 import time
 import warnings
 import torch
-import torch.distributed as dist
-from contextlib import nullcontext
+import torch.distributed as dist        # 分布式训练通信库，用于多GPU训练
+from contextlib import nullcontext      # ？
 from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
@@ -17,18 +24,18 @@ from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import PretrainDataset
 from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore')           # 忽略所有警告
 
 
-def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+def train_epoch(epoch, loader, iters, start_step=0, wandb=None):        # wandb日志记录器
     start_time = time.time()
     last_step = start_step
     for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
-        input_ids = input_ids.to(args.device)
+        input_ids = input_ids.to(args.device)           # 输入的tokenid 以及标签
         labels = labels.to(args.device)
         last_step = step
         lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
-        for param_group in optimizer.param_groups:
+        for param_group in optimizer.param_groups:      # 这里的optimizer是什么时候定义的？
             param_group['lr'] = lr
 
         with autocast_ctx:
@@ -111,7 +118,7 @@ if __name__ == "__main__":
     setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
     
     # ========== 2. 配置目录、模型参数、检查ckp ==========
-    os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(args.save_dir, exist_ok=True)       # 递归创建目录，exist_ok=True,就是目录可以已经存在，不会报错，反之
     lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=bool(args.use_moe))
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
     

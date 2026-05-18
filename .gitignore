@@ -4,3 +4,11 @@ __pycache__/
 out
 website/
 docs-minimind/
+# 模型权重和训练输出
+checkpoints/
+
+# 可能的数据集（如果不想提交）
+dataset/*.jsonl
+
+# 不知道用途的目录，先忽略
+minimind-3/
