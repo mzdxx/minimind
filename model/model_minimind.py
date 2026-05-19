@@ -501,7 +501,7 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
             # 如果label里某个位置是-100，这个位置不参与loss计算，这在SFT里会使用到
             loss = F.cross_entropy(
                 x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100
-            )
+            )  # 这里默认reduction: str = "mean"，也就是返回的是平均交叉熵
 
         # 它把多个返回值打包成一个带有名字书信的对象，方便调用方以属性方式访问如out.loss
         return MoeCausalLMOutputWithPast(

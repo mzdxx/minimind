@@ -1,10 +1,12 @@
 """
 训练工具函数集合
 """
+
 import os
 import sys
+
 __package__ = "trainer"
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import random
 import math
 import numpy as np
@@ -15,19 +17,35 @@ from torch.utils.data import Sampler
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 from model.model_minimind import MiniMindForCausalLM
 
+
+# 统计模型参数量
 def get_model_params(model, config):
+    # p.numel()统计这个张量中有多少数字
     total = sum(p.numel() for p in model.parameters()) / 1e6
-    n_routed = getattr(config, 'n_routed_experts', getattr(config, 'num_experts', 0))
-    n_active = getattr(config, 'num_experts_per_tok', 0)
-    n_shared = getattr(config, 'n_shared_experts', 0)
-    expert = sum(p.numel() for n, p in model.named_parameters() if 'mlp.experts.0.' in n) / 1e6
-    shared_expert = sum(p.numel() for n, p in model.named_parameters() if 'mlp.shared_experts.0.' in n) / 1e6
+    n_routed = getattr(config, "n_routed_experts", getattr(config, "num_experts", 0))
+    n_active = getattr(config, "num_experts_per_tok", 0)
+    n_shared = getattr(config, "n_shared_experts", 0)
+    expert = (
+        sum(p.numel() for n, p in model.named_parameters() if "mlp.experts.0." in n)
+        / 1e6
+    )
+    shared_expert = (
+        sum(
+            p.numel()
+            for n, p in model.named_parameters()
+            if "mlp.shared_experts.0." in n
+        )
+        / 1e6
+    )
     base = total - (expert * n_routed) - (shared_expert * n_shared)
     active = base + (expert * n_active) + (shared_expert * n_shared)
-    if active < total: Logger(f'Model Params: {total:.2f}M-A{active:.2f}M')
-    else: Logger(f'Model Params: {total:.2f}M')
+    if active < total:
+        Logger(f"Model Params: {total:.2f}M-A{active:.2f}M")
+    else:
+        Logger(f"Model Params: {total:.2f}M")
 
 
+# 多卡训练时只让一个一个进程打印
 def is_main_process():
     return not dist.is_initialized() or dist.get_rank() == 0
 
@@ -37,100 +55,141 @@ def Logger(content):
         print(content)
 
 
-def get_lr(current_step, total_steps, lr):          # 带下限的余弦衰减
-    return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
+def get_lr(current_step, total_steps, lr):  # 带下限的余弦衰减
+    return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * current_step / total_steps)))
 
 
 def init_distributed_mode():
-    if int(os.environ.get("RANK", -1)) == -1:       # os.environ是一个字典-like对象，存储系统的环境变量，.get(),字典的get方法，如果环境变量rank不存在，说明没有启动分布式训练
+    if int(os.environ.get("RANK", -1)) == -1:
+        # os.environ是一个字典-like对象，存储系统的环境变量，.get(),字典的get方法，如果环境变量rank不存在，说明没有启动分布式训练
         return 0  # 非DDP模式
 
-    dist.init_process_group(backend="nccl")     # 初始化进程组，nnccl是GPU通信后端
+    dist.init_process_group(backend="nccl")  # 初始化进程组，nnccl是GPU通信后端
     local_rank = int(os.environ["LOCAL_RANK"])  # 环境变量LOCAL_RANK本地序号
-    torch.cuda.set_device(local_rank)       # 指定当前进程使用那张GPU
+    torch.cuda.set_device(local_rank)  # 指定当前进程使用那张GPU
     return local_rank
 
 
 def setup_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)  # Python random 的随机种子
+    np.random.seed(seed)  # Numpy的随机种子
+    torch.manual_seed(seed)  # Pytorch CPU的随机种子
+    torch.cuda.manual_seed(seed)  # Pytorch GPU的随机种子
+    torch.cuda.manual_seed_all(seed)  # 所有 GPU 的 CUDA 随机种子
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs):
+
+# 保存和读取断点
+def lm_checkpoint(
+    lm_config,
+    weight="full_sft",
+    model=None,
+    optimizer=None,
+    epoch=0,
+    step=0,
+    wandb=None,
+    save_dir="../checkpoints",
+    **kwargs,
+):
     os.makedirs(save_dir, exist_ok=True)
-    moe_path = '_moe' if lm_config.use_moe else ''
-    ckp_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
-    resume_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}_resume.pth'
+    moe_path = "_moe" if lm_config.use_moe else ""
+    # 普通权重
+    ckp_path = f"{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth"
+    # 断点续训的权重
+    resume_path = f"{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}_resume.pth"
 
     if model is not None:
-        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
-        raw_model = getattr(raw_model, '_orig_mod', raw_model)
+        raw_model = (
+            model.module if isinstance(model, DistributedDataParallel) else model
+        )
+        raw_model = getattr(raw_model, "_orig_mod", raw_model)
         state_dict = raw_model.state_dict()
         state_dict = {k: v.half().cpu() for k, v in state_dict.items()}
-        ckp_tmp = ckp_path + '.tmp'
+
+        # 保存普通checkpoint,原子替换思路，先保存到临时文件，再替换
+        ckp_tmp = ckp_path + ".tmp"
         torch.save(state_dict, ckp_tmp)
         os.replace(ckp_tmp, ckp_path)
         wandb_id = None
         if wandb:
-            if hasattr(wandb, 'get_run'):
+            if hasattr(wandb, "get_run"):
                 run = wandb.get_run()
-                wandb_id = getattr(run, 'id', None) if run else None
+                wandb_id = getattr(run, "id", None) if run else None
             else:
-                wandb_id = getattr(wandb, 'id', None)
+                wandb_id = getattr(wandb, "id", None)
 
+        # 保存续训数据
         resume_data = {
-            'model': state_dict,
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch,
-            'step': step,
-            'world_size': dist.get_world_size() if dist.is_initialized() else 1,
-            'wandb_id': wandb_id
+            "model": state_dict,
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "step": step,
+            "world_size": dist.get_world_size() if dist.is_initialized() else 1,
+            "wandb_id": wandb_id,
         }
         for key, value in kwargs.items():
             if value is not None:
-                if hasattr(value, 'state_dict'):
-                    raw_value = value.module if isinstance(value, DistributedDataParallel) else value
-                    raw_value = getattr(raw_value, '_orig_mod', raw_value)
+                if hasattr(value, "state_dict"):
+                    raw_value = (
+                        value.module
+                        if isinstance(value, DistributedDataParallel)
+                        else value
+                    )
+                    raw_value = getattr(raw_value, "_orig_mod", raw_value)
                     resume_data[key] = raw_value.state_dict()
                 else:
                     resume_data[key] = value
 
-        resume_tmp = resume_path + '.tmp'
+        resume_tmp = resume_path + ".tmp"
         torch.save(resume_data, resume_tmp)
         os.replace(resume_tmp, resume_path)
         del state_dict, resume_data
         torch.cuda.empty_cache()
     else:  # 加载模式
         if os.path.exists(resume_path):
-            ckp_data = torch.load(resume_path, map_location='cpu')
-            saved_ws = ckp_data.get('world_size', 1)
+            ckp_data = torch.load(resume_path, map_location="cpu")
+            saved_ws = ckp_data.get("world_size", 1)
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
             if saved_ws != current_ws:
-                ckp_data['step'] = ckp_data['step'] * saved_ws // current_ws
-                Logger(f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}')
+                ckp_data["step"] = ckp_data["step"] * saved_ws // current_ws
+                Logger(
+                    f'GPU数量变化({saved_ws}→{current_ws})，step已自动转换为{ckp_data["step"]}'
+                )
             return ckp_data
         return None
 
 
-def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', save_dir='../out', device='cuda'):
+# 创建tokenizer和模型
+def init_model(
+    lm_config,
+    from_weight="pretrain",
+    tokenizer_path="../model",
+    save_dir="../out",
+    device="cuda",
+):
+    #
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindForCausalLM(lm_config)
 
-    if from_weight!= 'none':
-        moe_suffix = '_moe' if lm_config.use_moe else ''
-        weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+    if from_weight != "none":
+        moe_suffix = "_moe" if lm_config.use_moe else ""
+        weight_path = (
+            f"{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth"
+        )
         weights = torch.load(weight_path, map_location=device)
         model.load_state_dict(weights, strict=False)
 
+    # 打印参数量并搬到GPU
     get_model_params(model, lm_config)
-    Logger(f'Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')
+    Logger(
+        f"Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M"
+    )
     return model.to(device), tokenizer
 
 
+# 断点续训时跳过已经训练过的batch
+# 继承自Pytorch的Sampler基类，是一个自定义采样器
 class SkipBatchSampler(Sampler):
     def __init__(self, sampler, batch_size, skip_batches=0):
         self.sampler = sampler
@@ -153,25 +212,36 @@ class SkipBatchSampler(Sampler):
             yield batch
 
     def __len__(self):
+        # sampler 产生的总样本数除以 batch_size，向上取整,下面是经典的向上取整
         total_batches = (len(self.sampler) + self.batch_size - 1) // self.batch_size
         return max(0, total_batches - self.skip_batches)
 
 
 class LMForRewardModel:
     def __init__(self, model_path, device="cuda", dtype=torch.float16):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModel.from_pretrained(model_path, torch_dtype=dtype, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True
+        )
+        self.model = AutoModel.from_pretrained(
+            model_path, torch_dtype=dtype, trust_remote_code=True
+        )
         self.model = self.model.to(device).eval()
         self.device = device
 
     @torch.no_grad()
     def get_score(self, messages, response):
-        history_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages[:-1]])
-        last_query = messages[-1]['content'] if messages else ""
-        message_context = f"{history_text}\n以上是对话历史。我的新问题是：\n{last_query}" if history_text else last_query
+        history_text = "\n".join(
+            [f"{m['role']}: {m['content']}" for m in messages[:-1]]
+        )
+        last_query = messages[-1]["content"] if messages else ""
+        message_context = (
+            f"{history_text}\n以上是对话历史。我的新问题是：\n{last_query}"
+            if history_text
+            else last_query
+        )
         eval_messages = [
             {"role": "user", "content": message_context},
-            {"role": "assistant", "content": response}
+            {"role": "assistant", "content": response},
         ]
         score = self.model.get_score(self.tokenizer, eval_messages)
         return max(min(score, 3.0), -3.0)
