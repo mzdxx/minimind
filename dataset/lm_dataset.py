@@ -10,8 +10,10 @@ from datasets import load_dataset, Features, Sequence, Value
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+# conversations是一个列表，每一个元素是字典
 def pre_processing_chat(conversations, add_system_ratio=0.2):
     # tool use 数据完整保留不做处理
+    # 一旦发现对话中有工具调用相关内容，不做任何修改直接返回
     if any(conv.get("tools") for conv in conversations):
         return conversations
 
@@ -83,10 +85,14 @@ class PretrainDataset(Dataset):
 
 
 class SFTDataset(Dataset):
+    # 继承自Dataset类，需要实现__len__,__getitem__方法
     def __init__(self, jsonl_path, tokenizer, max_length=1024):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
+
+        # 定义一个特征模式，告诉load_dataset如何解析JSON数据
+        # Features是dataset中用于定义数据列类型的类，类似数据库的Schema
         features = Features(
             {
                 "conversations": [
@@ -103,6 +109,8 @@ class SFTDataset(Dataset):
         self.samples = load_dataset(
             "json", data_files=jsonl_path, split="train", features=features
         )
+        # 将bos_token+assistant\n和eos_token编码成token_id列表
+        # 返回的 input_ids 是一个列表，例如 [bos_id, assistant的id, 换行的id]。
         self.bos_id = tokenizer(
             f"{tokenizer.bos_token}assistant\n", add_special_tokens=False
         ).input_ids
@@ -113,20 +121,26 @@ class SFTDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    # 将对话转为文本,conversations是一个列表
     def create_chat_prompt(self, conversations):
         messages = []
         tools = None
         for message in conversations:
             message = dict(message)
+            # 如果角色是system且带有tool字段，
             if message.get("role") == "system" and message.get("tools"):
                 tools = (
-                    json.loads(message["tools"])
+                    json.loads(
+                        message["tools"]
+                    )  # json.load()把json格式的字符串变成Python原生格式
                     if isinstance(message["tools"], str)
-                    else message["tools"]
+                    else message["tools"]  # 不是字符串就直接赋值
                 )
             if message.get("tool_calls") and isinstance(message["tool_calls"], str):
+                # JSON格式的字符串解析成Python对象(字典/列表)
                 message["tool_calls"] = json.loads(message["tool_calls"])
             messages.append(message)
+        # 使用分词器配置中的chat_template，将消息列表转换成模型训练时使用的字符串
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False, tools=tools
         )
@@ -134,6 +148,7 @@ class SFTDataset(Dataset):
     def generate_labels(self, input_ids):
         labels = [-100] * len(input_ids)
         i = 0
+        # 遍历inputs_ids找助手回复的开始位置和结束位置
         while i < len(input_ids):
             if input_ids[i : i + len(self.bos_id)] == self.bos_id:
                 start = i + len(self.bos_id)
@@ -142,8 +157,10 @@ class SFTDataset(Dataset):
                     if input_ids[end : end + len(self.eos_id)] == self.eos_id:
                         break
                     end += 1
+                # 从start到end+eos长度，也就是整个助手回答+结束符
                 for j in range(start, min(end + len(self.eos_id), self.max_length)):
                     labels[j] = input_ids[j]
+                # 直接跳到结束标记之后避免重复扫描，继续寻找下一组bos,因为可能时多轮对话
                 i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
             else:
                 i += 1
